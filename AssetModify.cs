@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using YamlDotNet.RepresentationModel;
 
@@ -12,7 +13,7 @@ namespace AssetSwitcherDLL
 {
     public class AssetModify
     {
-        public static string[] AsssetExtension = { ".asset", ".prefab" };
+        public static string[] AsssetExtension = { ".asset", ".prefab", ".unity" };
 
         List<Assembly> _assemblies;
         DirectoryInfo _metadir;
@@ -36,6 +37,8 @@ namespace AssetSwitcherDLL
 
         ConcurrentDictionary<string, string> _guid2path = new ConcurrentDictionary<string, string>();
 
+        ConcurrentDictionary<string, Action<string>> _extension_handler = new ConcurrentDictionary<string, Action<string>>();
+
         //note assembly should be in assetdir[has corresponding .meta]
         public AssetModify(List<Assembly> assemblies, DirectoryInfo metadir, DirectoryInfo assetdir)
         {
@@ -49,14 +52,19 @@ namespace AssetSwitcherDLL
             _assemblies = assemblies;
             _metadir = metadir;
             _assetdir = assetdir;
+
+            foreach (var extension in AsssetExtension)
+            {
+                _extension_handler.TryAdd(extension, DefaultAssetModfiy);
+            }
         }
 
-        string ShortPathName(DirectoryInfo parent,string fullpath)
+        string ShortPathName(DirectoryInfo parent, string fullpath)
         {
             return fullpath.Replace(parent.FullName, "");
         }
 
-        public void BuildAssemblyInfo()
+        public void BuildAssemblyInfo(string pattern = ".*")
         {
             var assembliesname = _assemblies.Select((assembly) => assembly.GetName().Name + ".dll.meta");
             var assembliesmeta = new ConcurrentDictionary<string, string>();
@@ -65,18 +73,22 @@ namespace AssetSwitcherDLL
             var assetdirfileinfos = _assetdir.GetFiles("*.*", SearchOption.AllDirectories);
             Parallel.ForEach(assetdirfileinfos, file =>
             {
+                if (file.Extension == ".meta" && file.Name.Contains(".dll"))
+                {
+                    var assemblyname = assembliesname.FirstOrDefault(name => file.Name == name);
+                    if (assemblyname != null)
+                        assembliesmeta.TryAdd(assemblyname, file.FullName);
+                }
+
+                var regex = new Regex(pattern);
+                if (!regex.IsMatch(file.FullName))
+                    return;
+
                 if (AsssetExtension.Contains(file.Extension))
                 {
                     _assetfiles.Add(file.FullName);
                     return;
                 }
-                if (file.Extension != ".meta" || file.Extension == ".dll")
-                    return;
-                if (!file.Name.Contains(".dll"))
-                    return;
-                var assemblyname = assembliesname.FirstOrDefault(name => file.Name == name);
-                if (assemblyname != null)
-                    assembliesmeta.TryAdd(assemblyname, file.FullName);
             });
 
 
@@ -116,9 +128,9 @@ namespace AssetSwitcherDLL
                   _csmetafiles.AddOrUpdate(file.Name, file.FullName, (key, value) =>
                   {
                       Console.WriteLine(string.Format("{0} has exist please change filename&classname.warning replace {1} by {2}",
-                          file.Name, 
-                          ShortPathName(_metadir,value), 
-                          ShortPathName(_metadir,file.FullName)));
+                          file.Name,
+                          ShortPathName(_metadir, value),
+                          ShortPathName(_metadir, file.FullName)));
                       return file.FullName;
                   });
               }
@@ -144,8 +156,9 @@ namespace AssetSwitcherDLL
             var types = _assemblies
                 .Select(assembly => assembly.GetTypes())
                 .SelectMany(t => t)
-                //必须继承该类才能序列化
-                .Where(type => type.IsSubclassOf(typeof(UnityEngine.ScriptableObject))).ToList();
+                //必须继承ScriptableObject才能序列化
+                //必须继承MonoBehaviour才能被挂接
+                .Where(type => type.IsSubclassOf(typeof(UnityEngine.ScriptableObject)) || type.IsSubclassOf(typeof(UnityEngine.MonoBehaviour))).ToList();
             Parallel.ForEach(types, type =>
              {
                  var fullpath = string.Empty;
@@ -160,7 +173,7 @@ namespace AssetSwitcherDLL
                      return;
                  }
                  if (!_path2type.TryAdd(fullpath, type))
-                     Console.WriteLine(string.Format("error:type {0} path {1} existed!", type.Name,ShortPathName(_metadir,fullpath)));
+                     Console.WriteLine(string.Format("error:type {0} path {1} existed!", type.Name, ShortPathName(_metadir, fullpath)));
 
                  if (!_type2fileid.TryAdd(type, FileIDUtil.Compute(type).ToString()))
                      Console.WriteLine(string.Format("error:type {0} add fileid failed", type.Name));
@@ -171,121 +184,114 @@ namespace AssetSwitcherDLL
         {
             Parallel.ForEach(_assetfiles, file =>
             {
-                var shortfilename = ShortPathName(_assetdir, file);
-                try
+                var extension = Path.GetExtension(file);
+                Action<string> handler = null;
+                if (_extension_handler.TryGetValue(extension, out handler))
+                    handler.Invoke(file);
+            });
+        }
+
+        public void ModfiyAsset(string file)
+        {
+            var extension = Path.GetExtension(file);
+            Action<string> handler = null;
+            if (_extension_handler.TryGetValue(extension, out handler))
+                return;
+            Parallel.ForEach(_assetfiles, asset =>
+            {
+                var filename = Path.GetFileName(asset);
+                if (filename != file)
+                    return;
+                handler.Invoke(file);
+            });
+        }
+
+        public void DefaultAssetModfiy(string file)
+        {
+            var shortfilename = ShortPathName(_assetdir, file);
+            try
+            {
+                var lines = File.ReadAllLines(file);
+                lines = lines.Select(line =>
                 {
-                    var yamlstream = new YamlStream();
-                    yamlstream.Load(new StringReader(File.ReadAllText(file)));
-                    var yamldocument = yamlstream.Documents.FirstOrDefault();
-                    if(yamldocument == null || yamldocument.RootNode.NodeType != YamlNodeType.Mapping)
+                    if (!line.Contains("m_Script"))
+                        return line;
+                    var begin = line.IndexOf("fileID: ") + 8;
+                    if (begin == -1)
+                        return line;
+                    var end = line.IndexOf(',', begin);
+                    if (end == -1)
+                        return line;
+
+                    var fileID = line.Substring(begin, end - begin);
+                    begin = line.IndexOf("guid: ") + 6;
+                    if (begin == -1)
+                        return line;
+                    end = begin + 32;
+                    var guid = line.Substring(begin, end - begin);
+
+                    if (_assembliesguid.ContainsValue(guid))
                     {
-                        Console.WriteLine(string.Format("YamlStream.Documents Check Failed{0}", file));
-                        return;
+                        Console.WriteLine(string.Format("{0}.MonoBehavior.m_Script Had Modfiy Skip it", shortfilename));
+                        return line;
                     }
-                   
-                    var yamlmapping = (YamlMappingNode)yamldocument.RootNode;
-
-                    YamlNode MonoBehaviourMappingNode = null;
-                    if (!yamlmapping.Children.TryGetValue(
-                        new YamlScalarNode("MonoBehaviour"), 
-                        out MonoBehaviourMappingNode) || MonoBehaviourMappingNode.NodeType != YamlNodeType.Mapping)
-                    {
-                        //Console.WriteLine(string.Format("Asset.MonoBehaviour Check Failed"));
-                        return;
-                    }
-                    var monobehaviour = (YamlMappingNode)MonoBehaviourMappingNode;
-                    YamlNode m_ScriptMappingNode = null;
-                    if (!monobehaviour.Children.TryGetValue(
-                        new YamlScalarNode("m_Script"),
-                        out m_ScriptMappingNode) || m_ScriptMappingNode.NodeType != YamlNodeType.Mapping)
-                    {
-                        Console.WriteLine(string.Format("MonoBehaviour.m_Script Check Failed"));
-                        return;
-                    }
-                    var mscript = (YamlMappingNode)m_ScriptMappingNode;
-
-                    var guidScalarNode = new YamlScalarNode("guid");
-                    var fileIDScalarNode = new YamlScalarNode("fileID");
-
-
-                    var guid = (mscript.Children[guidScalarNode] as YamlScalarNode).Value;
-                    var fileID = (mscript.Children[fileIDScalarNode] as YamlScalarNode).Value;
-                    Console.WriteLine(string.Format("Old {0}.MonoBehavior.m_Script {{fileID:{1} guid:{2}}}", shortfilename, fileID, guid));
 
                     //guid->path
                     string cspath = null;
-                    if (!_guid2path.TryGetValue(guid,out cspath))
+                    if (!_guid2path.TryGetValue(guid, out cspath))
                     {
                         Console.WriteLine(string.Format("AssetModfiy.Map GUID {0} To Path Failed", shortfilename));
-                        return;
+                        return line;
                     }
+
+                    Console.WriteLine(string.Format("Old {0}.MonoBehavior.m_Script {{fileID:{1} guid:{2}}}", shortfilename, fileID, guid));
 
                     //path->type
                     Type type = null;
-                    if (!_path2type.TryGetValue(cspath,out type))
+                    if (!_path2type.TryGetValue(cspath, out type))
                     {
                         Console.WriteLine(string.Format("AssetModfiy.Map(GUID:{1}) Path {0} To Type Failed", shortfilename, guid));
-                        return;
+                        return line;
                     }
 
+                    string newguid = null;
                     //type->assembly->guid
-                    if (!_assembliesguid.TryGetValue(type.Assembly,out guid))
+                    if (!_assembliesguid.TryGetValue(type.Assembly, out newguid))
                     {
-                        Console.WriteLine(string.Format("Error: AssetModfiy.Map Type {0} To GUID",type));
-                        return;
+                        Console.WriteLine(string.Format("Error: AssetModfiy.Map Type {0} To GUID", type));
+                        return line;
                     }
+                    string newfileID = null;
                     //type->fileID
-                    if (!_type2fileid.TryGetValue(type,out fileID))
+                    if (!_type2fileid.TryGetValue(type, out newfileID))
                     {
                         Console.WriteLine(string.Format("Error: AssetModfiy.Map Type {0} To fileID", type));
-                        return;
+                        return line;
                     }
 
-                    Console.WriteLine(string.Format("New {0}.MonoBehavior.m_Script {{fileID:{1} guid:{2}}}", shortfilename, fileID, guid));
+                    Console.WriteLine(string.Format("New {0}.MonoBehavior.m_Script {{fileID:{1} guid:{2}}}", shortfilename, newfileID, newguid));
+                    return line.Replace(fileID, newfileID).Replace(guid, newguid);
+                }).ToArray();
 
-                    (mscript.Children[guidScalarNode] as YamlScalarNode).Value = guid;
-                    (mscript.Children[fileIDScalarNode] as YamlScalarNode).Value = fileID;
+                var modfiy = file + ".modfiy";
+                if (!File.Exists(modfiy))
+                    File.Copy(file, modfiy);
 
-                    var modfiy = file + ".modfiy";
-                    if (!File.Exists(modfiy))
-                        File.Copy(file, modfiy);
+                File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
 
-                    File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
-                    var test = new StringWriter();
-                    yamlstream.Save(test, false);
+                //行拼接
+                //并干掉: ''
 
-                    //注意 yaml 保存的结果不符合unity的，进行二次处理
-                    var text = test.GetStringBuilder().ToString();
-                    var lines = text.Split('\n').ToList();
-
-                    //删除第一行
-                    lines.RemoveAt(0);
-                    //删除倒数第二行
-                    lines.RemoveAt(lines.Count - 2);
-
-                    //插入原文件的前三行
-                    var threelines = File.ReadLines(file).GetEnumerator() ;
-                    for (var i = 0; i != 3; ++i)
-                    {
-                        threelines.MoveNext();
-                        lines.Insert(i, threelines.Current);
-                    }
-                    threelines.Dispose();
-
-                    //行拼接
-                    //并干掉: ''
-                    text = string.Join("\n", lines.Select(line => line.Replace(": ''", ": ")));
-
-                    //强制覆盖
-                    File.Delete(file);
-                    File.WriteAllText(file, text);
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine(string.Format("AssetModfiy.ModfiyAsset {0} Failed Exception:{1}", shortfilename, e));
-                }
-            });
+                //强制覆盖
+                File.Delete(file);
+                File.WriteAllLines(file, lines);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(string.Format("AssetModfiy.ModfiyAsset {0} Failed Exception:{1}", shortfilename, e));
+            }
         }
+
 
         public void RevertAsset()
         {

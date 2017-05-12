@@ -17,10 +17,12 @@ namespace AssetSwitcherDLL
             var metadir = ".";
             string assetdir = null;
             bool revert = false;
+            string pattern = ".*";
             ArgumentSyntax.Parse(args, synatx =>
              {
                  synatx.DefineOption("m|metadir", ref metadir, "The .meta files to resolve guid");
                  synatx.DefineOption("a|assetdir", ref assetdir, "The Asset Fold to resolve asset's type reference");
+                 synatx.DefineOption("p|pattern", ref pattern, "The Asset pattern to specify asset file default:.*");
                  synatx.DefineOption("r|revert", ref revert, "Revert Asset Modfiy");
                  synatx.DefineParameterList("assembly", ref assemblyfiles, "The assembly files to resolve type");
              });
@@ -50,7 +52,7 @@ namespace AssetSwitcherDLL
 
                 if (!revert)
                 {
-                    asset_modify.BuildAssemblyInfo();
+                    asset_modify.BuildAssemblyInfo(pattern);
                     asset_modify.ModifyAsset();
                 }
                 else
