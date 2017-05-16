@@ -17,6 +17,7 @@ namespace AssetSwitcherDLL
             var metadir = ".";
             string assetdir = null;
             bool revert = false;
+            bool ab = false;
             string pattern = ".*";
             ArgumentSyntax.Parse(args, synatx =>
              {
@@ -24,6 +25,7 @@ namespace AssetSwitcherDLL
                  synatx.DefineOption("a|assetdir", ref assetdir, "The Asset Fold to resolve asset's type reference");
                  synatx.DefineOption("p|pattern", ref pattern, "The Asset pattern to specify asset file default:.*");
                  synatx.DefineOption("r|revert", ref revert, "Revert Asset Modfiy");
+                 synatx.DefineOption("ab|assetbundle", ref ab, "AssetBundle 模式");
                  synatx.DefineParameterList("assembly", ref assemblyfiles, "The assembly files to resolve type");
              });
             var assemblies = assemblyfiles.Select(file =>

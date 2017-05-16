@@ -13,6 +13,8 @@ namespace AssetSwitcherDLL
 {
     public class AssetModify
     {
+        delegate void AssetHandler(string file);
+
         public static string[] AsssetExtension = { ".asset", ".prefab", ".unity" };
 
         List<Assembly> _assemblies;
@@ -37,7 +39,7 @@ namespace AssetSwitcherDLL
 
         ConcurrentDictionary<string, string> _guid2path = new ConcurrentDictionary<string, string>();
 
-        ConcurrentDictionary<string, Action<string>> _extension_handler = new ConcurrentDictionary<string, Action<string>>();
+        ConcurrentDictionary<string, AssetHandler> _extension_handler = new ConcurrentDictionary<string, AssetHandler>();
 
         //note assembly should be in assetdir[has corresponding .meta]
         public AssetModify(List<Assembly> assemblies, DirectoryInfo metadir, DirectoryInfo assetdir)
@@ -57,6 +59,12 @@ namespace AssetSwitcherDLL
             {
                 _extension_handler.TryAdd(extension, DefaultAssetModfiy);
             }
+        }
+
+        public void RegisterExtensionHandler(string extension, Action<string> action)
+        {
+            if (_extension_handler.ContainsKey(extension))
+                _extension_handler[extension] +=new AssetHandler(action);
         }
 
         string ShortPathName(DirectoryInfo parent, string fullpath)
@@ -185,7 +193,7 @@ namespace AssetSwitcherDLL
             Parallel.ForEach(_assetfiles, file =>
             {
                 var extension = Path.GetExtension(file);
-                Action<string> handler = null;
+                AssetHandler handler = null;
                 if (_extension_handler.TryGetValue(extension, out handler))
                     handler.Invoke(file);
             });
@@ -194,7 +202,7 @@ namespace AssetSwitcherDLL
         public void ModfiyAsset(string file)
         {
             var extension = Path.GetExtension(file);
-            Action<string> handler = null;
+            AssetHandler handler = null;
             if (_extension_handler.TryGetValue(extension, out handler))
                 return;
             Parallel.ForEach(_assetfiles, asset =>
@@ -290,6 +298,11 @@ namespace AssetSwitcherDLL
             {
                 Console.WriteLine(string.Format("AssetModfiy.ModfiyAsset {0} Failed Exception:{1}", shortfilename, e));
             }
+        }
+
+        public void AssetBundleModfiy(string file)
+        {
+
         }
 
 
