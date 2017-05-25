@@ -15,7 +15,7 @@ namespace AssetSwitcherDLL
     {
         delegate void AssetHandler(string file);
 
-        public static string[] AsssetExtension = { ".asset", ".prefab", ".unity" };
+        public static string[] AsssetExtension = { ".asset", ".prefab", ".unity",".anim" };
 
         List<Assembly> _assemblies;
         DirectoryInfo _metadir;
@@ -54,17 +54,14 @@ namespace AssetSwitcherDLL
             _assemblies = assemblies;
             _metadir = metadir;
             _assetdir = assetdir;
-
-            foreach (var extension in AsssetExtension)
-            {
-                _extension_handler.TryAdd(extension, DefaultAssetModfiy);
-            }
         }
 
         public void RegisterExtensionHandler(string extension, Action<string> action)
         {
             if (_extension_handler.ContainsKey(extension))
                 _extension_handler[extension] +=new AssetHandler(action);
+            else
+                _extension_handler[extension] = new AssetHandler(action);
         }
 
         string ShortPathName(DirectoryInfo parent, string fullpath)
@@ -74,6 +71,17 @@ namespace AssetSwitcherDLL
 
         public void BuildAssemblyInfo(string pattern = ".*")
         {
+            var DefaultAssetModfiy = new AssetHandler(MakeStringReplaceAssetModify("m_Script"));
+            foreach (var extension in AsssetExtension)
+            {
+                if(!_extension_handler.ContainsKey(extension))
+                    _extension_handler.TryAdd(extension,DefaultAssetModfiy);
+            }
+            if (_extension_handler.ContainsKey(".anim"))
+            {
+                _extension_handler[".anim"] = new AssetHandler(MakeStringReplaceAssetModify("script"));
+            }
+
             var assembliesname = _assemblies.Select((assembly) => assembly.GetName().Name + ".dll.meta");
             var assembliesmeta = new ConcurrentDictionary<string, string>();
 
@@ -214,7 +222,12 @@ namespace AssetSwitcherDLL
             });
         }
 
-        public void DefaultAssetModfiy(string file)
+        Action<string> MakeStringReplaceAssetModify(string prefix)
+        {
+            return file => DefaultAssetModfiy(file, prefix);
+        }
+
+        public void DefaultAssetModfiy(string file,string prefix)
         {
             var shortfilename = ShortPathName(_assetdir, file);
             try
@@ -222,7 +235,7 @@ namespace AssetSwitcherDLL
                 var lines = File.ReadAllLines(file);
                 lines = lines.Select(line =>
                 {
-                    if (!line.Contains("m_Script"))
+                    if (!line.Contains(prefix))
                         return line;
                     var begin = line.IndexOf("fileID: ") + 8;
                     if (begin == -1)
